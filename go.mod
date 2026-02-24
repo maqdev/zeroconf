@@ -1,10 +1,15 @@
 module github.com/libp2p/zeroconf/v2
 
-go 1.21
+go 1.24.0
 
 require (
-	github.com/miekg/dns v1.1.43
-	golang.org/x/net v0.0.0-20210423184538-5f58ad60dda6
+	github.com/miekg/dns v1.1.72
+	golang.org/x/net v0.50.0
 )
 
-require golang.org/x/sys v0.0.0-20210426080607-c94f62235c83 // indirect
+require (
+	golang.org/x/mod v0.33.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/tools v0.42.0 // indirect
+)
