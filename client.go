@@ -32,14 +32,16 @@ var initialQueryInterval = 4 * time.Second
 
 // Client structure encapsulates both IPv4/IPv6 UDP connections.
 type client struct {
-	ipv4conn *ipv4.PacketConn
-	ipv6conn *ipv6.PacketConn
-	ifaces   []net.Interface
+	ipv4conn     *ipv4.PacketConn
+	ipv6conn     *ipv6.PacketConn
+	ifaces       []net.Interface
+	writeTimeout time.Duration
 }
 
 type clientOpts struct {
-	listenOn IPType
-	ifaces   []net.Interface
+	listenOn     IPType
+	ifaces       []net.Interface
+	writeTimeout time.Duration
 }
 
 // ClientOption fills the option struct to configure intefaces, etc.
@@ -60,6 +62,12 @@ func SelectIPTraffic(t IPType) ClientOption {
 func SelectIfaces(ifaces []net.Interface) ClientOption {
 	return func(o *clientOpts) {
 		o.ifaces = ifaces
+	}
+}
+
+func WriteTimeout(timeout time.Duration) ClientOption {
+	return func(o *clientOpts) {
+		o.writeTimeout = timeout
 	}
 }
 
@@ -305,10 +313,16 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 // Shutdown client will close currently open connections and channel implicitly.
 func (c *client) shutdown() {
 	if c.ipv4conn != nil {
-		c.ipv4conn.Close()
+		err := c.ipv4conn.Close()
+		if err != nil {
+			log.Printf("[WARN] mdns: Failed to close ipv4 connection: %v", err)
+		}
 	}
 	if c.ipv6conn != nil {
-		c.ipv6conn.Close()
+		err := c.ipv6conn.Close()
+		if err != nil {
+			log.Printf("[WARN] mdns: Failed to close ipv4 connection: %v", err)
+		}
 	}
 }
 
@@ -437,6 +451,7 @@ func (c *client) sendQuery(msg *dns.Msg) error {
 	if err != nil {
 		return err
 	}
+	successful := 0
 	if c.ipv4conn != nil {
 		// See https://pkg.go.dev/golang.org/x/net/ipv4#pkg-note-BUG
 		// As of Golang 1.18.4
@@ -451,7 +466,13 @@ func (c *client) sendQuery(msg *dns.Msg) error {
 					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
 				}
 			}
-			c.ipv4conn.WriteTo(buf, &wcm, ipv4Addr)
+
+			err = writeToV4(c.ipv4conn, buf, &wcm, ipv4Addr, c.writeTimeout)
+			if err != nil {
+				log.Printf("[WARN] mdns: Failed to write to %v: %v", ipv4Addr, err)
+			} else {
+				successful++
+			}
 		}
 	}
 	if c.ipv6conn != nil {
@@ -468,8 +489,17 @@ func (c *client) sendQuery(msg *dns.Msg) error {
 					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
 				}
 			}
-			c.ipv6conn.WriteTo(buf, &wcm, ipv6Addr)
+
+			err = writeToV6(c.ipv6conn, buf, &wcm, ipv6Addr, c.writeTimeout)
+			if err != nil {
+				log.Printf("[WARN] mdns: Failed to write to %v: %v", ipv4Addr, err)
+			} else {
+				successful++
+			}
 		}
+	}
+	if successful == 0 {
+		return fmt.Errorf("failed to send query on any interface: %w", err)
 	}
 	return nil
 }

@@ -24,7 +24,9 @@ const (
 var defaultTTL uint32 = 3200
 
 type serverOpts struct {
-	ttl uint32
+	ttl            uint32
+	writeTimeout   time.Duration
+	logAllFailures bool
 }
 
 func applyServerOpts(options ...ServerOption) serverOpts {
@@ -47,6 +49,21 @@ type ServerOption func(*serverOpts)
 func TTL(ttl uint32) ServerOption {
 	return func(o *serverOpts) {
 		o.ttl = ttl
+	}
+}
+
+// ServerWriteTimeout sets the write timeout for the server's UDP connections.
+// If a write operation takes longer than the specified duration, it will be aborted and an error will be returned.
+// This can help prevent the server from hanging indefinitely due to network issues or unresponsive clients.
+func ServerWriteTimeout(timeout time.Duration) ServerOption {
+	return func(o *serverOpts) {
+		o.writeTimeout = timeout
+	}
+}
+
+func ServerLogAllFailures(logAll bool) ServerOption {
+	return func(o *serverOpts) {
+		o.logAllFailures = logAll
 	}
 }
 
@@ -179,6 +196,8 @@ type Server struct {
 	refCount       sync.WaitGroup
 	isShutdown     bool
 	ttl            uint32
+	writeTimeout   time.Duration
+	logAllFailures bool
 }
 
 // Constructs server structure
@@ -201,6 +220,7 @@ func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 		ipv6conn:       ipv6conn,
 		ifaces:         ifaces,
 		ttl:            opts.ttl,
+		writeTimeout:   opts.writeTimeout,
 		shouldShutdown: make(chan struct{}),
 	}
 
@@ -248,10 +268,16 @@ func (s *Server) Shutdown() {
 	close(s.shouldShutdown)
 
 	if s.ipv4conn != nil {
-		s.ipv4conn.Close()
+		err := s.ipv4conn.Close()
+		if err != nil {
+			log.Printf("failed to close ipv4 connection: %s", err)
+		}
 	}
 	if s.ipv6conn != nil {
-		s.ipv6conn.Close()
+		err := s.ipv6conn.Close()
+		if err != nil {
+			log.Printf("failed to close ipv6 connection: %s", err)
+		}
 	}
 
 	// Wait for connection and routines to be closed
@@ -741,18 +767,18 @@ func (s *Server) unicastResponse(resp *dns.Msg, ifIndex int, from net.Addr) erro
 		if ifIndex != 0 {
 			var wcm ipv4.ControlMessage
 			wcm.IfIndex = ifIndex
-			_, err = s.ipv4conn.WriteTo(buf, &wcm, addr)
+			err = writeToV4(s.ipv4conn, buf, &wcm, addr, s.writeTimeout)
 		} else {
-			_, err = s.ipv4conn.WriteTo(buf, nil, addr)
+			err = writeToV4(s.ipv4conn, buf, nil, addr, s.writeTimeout)
 		}
 		return err
 	} else {
 		if ifIndex != 0 {
 			var wcm ipv6.ControlMessage
 			wcm.IfIndex = ifIndex
-			_, err = s.ipv6conn.WriteTo(buf, &wcm, addr)
+			err = writeToV6(s.ipv6conn, buf, &wcm, addr, s.writeTimeout)
 		} else {
-			_, err = s.ipv6conn.WriteTo(buf, nil, addr)
+			err = writeToV6(s.ipv6conn, buf, nil, addr, s.writeTimeout)
 		}
 		return err
 	}
@@ -764,6 +790,7 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 	if err != nil {
 		return fmt.Errorf("failed to pack msg %v: %w", msg, err)
 	}
+	successful := 0
 	if s.ipv4conn != nil {
 		// See https://pkg.go.dev/golang.org/x/net/ipv4#pkg-note-BUG
 		// As of Golang 1.18.4
@@ -779,7 +806,15 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
 				}
 			}
-			s.ipv4conn.WriteTo(buf, &wcm, ipv4Addr)
+
+			err = writeToV4(s.ipv4conn, buf, &wcm, ipv4Addr, s.writeTimeout)
+			if err != nil {
+				if s.logAllFailures {
+					log.Printf("[WARN] mdns: Failed to write to %v: %v", ipv4Addr, err)
+				}
+			} else {
+				successful++
+			}
 		} else {
 			for _, intf := range s.ifaces {
 				switch runtime.GOOS {
@@ -790,7 +825,15 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 						log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
 					}
 				}
-				s.ipv4conn.WriteTo(buf, &wcm, ipv4Addr)
+
+				err = writeToV4(s.ipv4conn, buf, &wcm, ipv4Addr, s.writeTimeout)
+				if err != nil {
+					if s.logAllFailures {
+						log.Printf("[WARN] mdns: Failed to write to %v: %v", ipv4Addr, err)
+					}
+				} else {
+					successful++
+				}
 			}
 		}
 	}
@@ -810,7 +853,15 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
 				}
 			}
-			s.ipv6conn.WriteTo(buf, &wcm, ipv6Addr)
+
+			err = writeToV6(s.ipv6conn, buf, &wcm, ipv6Addr, s.writeTimeout)
+			if err != nil {
+				if s.logAllFailures {
+					log.Printf("[WARN] mdns: Failed to write3 to %v: %v", ipv4Addr, err)
+				}
+			} else {
+				successful++
+			}
 		} else {
 			for _, intf := range s.ifaces {
 				switch runtime.GOOS {
@@ -821,9 +872,20 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 						log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
 					}
 				}
-				s.ipv6conn.WriteTo(buf, &wcm, ipv6Addr)
+
+				err = writeToV6(s.ipv6conn, buf, &wcm, ipv6Addr, s.writeTimeout)
+				if err != nil {
+					if s.logAllFailures {
+						log.Printf("[WARN] mdns: Failed to write4 to %v: %v", ipv4Addr, err)
+					}
+				} else {
+					successful++
+				}
 			}
 		}
+	}
+	if successful == 0 {
+		return fmt.Errorf("failed to send multicast response on any interface: %w", err)
 	}
 	return nil
 }

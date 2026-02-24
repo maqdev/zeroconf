@@ -3,6 +3,7 @@ package zeroconf
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -116,4 +117,44 @@ func listMulticastInterfaces() []net.Interface {
 	}
 
 	return interfaces
+}
+
+func writeToV4(
+	con *ipv4.PacketConn,
+	buf []byte, cm *ipv4.ControlMessage, dst net.Addr,
+	timeout time.Duration,
+) error {
+	if timeout > 0 {
+		err := con.SetWriteDeadline(time.Now().Add(timeout))
+		if err != nil {
+			return fmt.Errorf("failed to set write deadline: %v", err)
+		}
+	}
+	n, err := con.WriteTo(buf, cm, dst)
+	return validateWriteTo(buf, n, err)
+}
+
+func writeToV6(
+	con *ipv6.PacketConn,
+	buf []byte, cm *ipv6.ControlMessage, dst net.Addr,
+	timeout time.Duration,
+) error {
+	if timeout > 0 {
+		err := con.SetWriteDeadline(time.Now().Add(timeout))
+		if err != nil {
+			return fmt.Errorf("failed to set write deadline: %v", err)
+		}
+	}
+	n, err := con.WriteTo(buf, cm, dst)
+	return validateWriteTo(buf, n, err)
+}
+
+func validateWriteTo(buf []byte, written int, err error) error {
+	if err != nil {
+		return err
+	}
+	if written != len(buf) {
+		return fmt.Errorf("incomplete write: only %d of %d bytes were written", written, len(buf))
+	}
+	return nil
 }
